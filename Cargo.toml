@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/st7701",
+    "crates/ws-esp32-s3-touch-lcd-2-8c",
+]
+# st7701 builds on host (no_std, but pure-trait code). The BSP only
+# builds on xtensa-esp32s3-none-elf because of its esp-hal dependency.
+default-members = ["crates/st7701"]
+
+[workspace.package]
+version    = "1.0.0"
+edition    = "2024"
+authors    = ["Gareth Bowker <gb@garethbowker.uk>"]
+license    = "MIT"
+repository = "https://github.com/garethbowker/ESP32-S3-Touch-LCD-2.8C"
+
+[workspace.dependencies]
+embedded-hal = "1.0"
+
+[profile.release]
+opt-level     = "s"
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = "debuginfo"
+debug         = 1

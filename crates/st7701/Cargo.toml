@@ -1,0 +1,25 @@
+[package]
+name        = "st7701"
+description = "no_std driver for the Sitronix ST7701 / ST7701S RGB-DPI panel controller (bit-banged 9-bit 3-wire SPI init over embedded-hal)."
+categories  = ["embedded", "no-std", "hardware-support"]
+keywords    = ["embedded-hal", "lcd", "st7701", "display", "no-std"]
+readme      = "README.md"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+embedded-hal = { workspace = true }
+
+[features]
+default = ["waveshare-2-8c"]
+## Bundle the canonical init sequence for the Waveshare ESP32-S3-Touch-LCD-2.8C.
+## Enabled by default. Disable if you only need the bare init machinery and
+## supply your own panel's sequence — keeps a couple of hundred bytes of
+## .rodata out of binaries that don't need it.
+waveshare-2-8c = []
+
+[package.metadata.docs.rs]
+all-features = true

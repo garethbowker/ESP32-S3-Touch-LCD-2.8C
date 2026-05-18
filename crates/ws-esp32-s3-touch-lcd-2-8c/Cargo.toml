@@ -1,0 +1,58 @@
+[package]
+name        = "ws-esp32-s3-touch-lcd-2-8c"
+description = "Board-support package for the Waveshare ESP32-S3-Touch-LCD-2.8C — round 480x480 IPS panel (ST7701) + Goodix GT911 touch + PCA9554 expander on an ESP32-S3."
+categories  = ["embedded", "no-std", "hardware-support"]
+keywords    = ["esp32", "embedded", "bsp", "waveshare", "slint"]
+readme      = "README.md"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[lib]
+test = false  # no_std, esp32s3-only — `cargo test` against host would fail
+
+[[example]]
+name              = "hello_touch"
+required-features = ["_example-runtime"]
+
+[features]
+# Internal — gates whether the example's runtime dependencies are
+# pulled in. End users don't need this; it's flipped automatically by
+# the example invocation.
+_example-runtime = []
+
+[dependencies]
+st7701           = { version = "1.0", path = "../st7701" }
+gt911            = { version = "0.3", default-features = false }
+port-expander    = "0.6"
+embedded-hal     = { workspace = true }
+embedded-hal-bus = "0.3"
+critical-section = "1"
+log              = "0.4"
+
+# `esp-hal` is pinned to `1.0.0-rc.0` because `esp-hal-embassy` still
+# depends on the hidden `__esp_hal_embassy` feature that `esp-hal`
+# 1.0.0-stable removed (2025-10-30). Until a re-paired
+# `esp-hal-embassy` lands on crates.io, bumping to esp-hal 1.1.x
+# breaks the embassy integration. The other esp-rs crates have
+# 2026-04-16 releases that *do* work with 1.1.x, but pulling them in
+# without esp-hal-embassy isn't viable.
+esp-hal = { version = "=1.0.0-rc.0", features = ["esp32s3", "unstable", "psram"] }
+
+# Runtime crates only the example uses. Not pulled in by default; the
+# example declares them as `required-features`. Library consumers
+# choose their own versions.
+#
+# Versions chosen to match the latest cohort that's still compatible
+# with esp-hal 1.0.0-rc.0 (the 2025-10-14 release set + a couple of
+# patch updates that landed after).
+[dev-dependencies]
+esp-hal-embassy        = { version = "0.9.1",  features = ["esp32s3"] }
+esp-backtrace          = { version = "0.18.1", features = ["esp32s3", "panic-handler", "println"] }
+esp-println            = { version = "0.16.1", features = ["esp32s3", "log-04"] }
+esp-bootloader-esp-idf = { version = "0.3",    features = ["esp32s3"] }
+esp-alloc              = "0.9"
+embassy-executor       = "0.7"
+embassy-time           = "0.4"

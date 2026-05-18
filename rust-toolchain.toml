@@ -1,0 +1,8 @@
+# Default toolchain for the workspace.
+#
+# `st7701` is pure no_std + embedded-hal traits and builds on stable.
+# The BSP crate overrides this with its own `rust-toolchain.toml`
+# selecting the Espressif Xtensa toolchain (installed via `espup`).
+[toolchain]
+channel    = "stable"
+components = ["rustfmt", "clippy"]

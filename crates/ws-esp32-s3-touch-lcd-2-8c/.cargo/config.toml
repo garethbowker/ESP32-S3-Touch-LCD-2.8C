@@ -1,0 +1,35 @@
+# Per-crate Cargo config: build for the Xtensa target and enable
+# build-std so `cargo build` / `cargo check` work without a precompiled
+# std for this bare-metal target.
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+# Linker flags only matter when building examples (binaries) — the
+# library itself doesn't link. Examples need esp-hal's linker script
+# and a no-startfiles bare-metal layout.
+[target.xtensa-esp32s3-none-elf]
+rustflags = [
+    "-C", "link-arg=-Tlinkall.x",
+    "-C", "link-arg=-nostartfiles",
+]
+runner = "espflash flash --monitor"
+
+[unstable]
+build-std = ["alloc", "core"]
+
+[alias]
+mon = "espflash monitor"
+
+[env]
+# The Waveshare 2.8C carries octal PSRAM (8 MiB, 8-bit serial bus).
+# esp-hal's default `psram-mode` is "quad", which silently drives the
+# wrong init sequence — CPU writes then end up landing in the data
+# cache without being written back to physical PSRAM, and the
+# framebuffer fills "succeed" but disappear on the next read.
+# Empirically confirmed via a
+# write → Cache_WriteBack → Cache_Invalidate → read probe.
+ESP_HAL_CONFIG_PSRAM_MODE = "octal"
+# Default log level for examples. esp-println reads this at compile
+# time to drop filtered-out levels from the binary.
+ESP_LOG = "info"

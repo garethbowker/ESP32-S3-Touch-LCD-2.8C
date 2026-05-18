@@ -1,0 +1,7 @@
+# Override the workspace's stable toolchain with the Espressif Rust
+# toolchain (installed by `espup install`). Cargo picks this up
+# automatically when building from this crate's directory or via
+# `-p ws-esp32-s3-touch-lcd-2-8c`.
+[toolchain]
+channel    = "esp"
+components = ["rust-src", "rustfmt", "clippy"]
