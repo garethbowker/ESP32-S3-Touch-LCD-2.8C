@@ -49,11 +49,12 @@ esp_bootloader_esp_idf::esp_app_desc!();
 // Visual constants
 // ---------------------------------------------------------------------------
 
-const BG:     Rgb565 = Rgb565::BLACK;
-const TEXT:   Rgb565 = Rgb565::WHITE;
-const BUBBLE: Rgb565 = Rgb565::CYAN;
-const CROSS:  Rgb565 = Rgb565::YELLOW;
-const FLASH:  Rgb565 = Rgb565::WHITE;
+const BG:        Rgb565 = Rgb565::BLACK;
+const TEXT:      Rgb565 = Rgb565::WHITE;
+const BUBBLE:    Rgb565 = Rgb565::CYAN;
+const REFERENCE: Rgb565 = Rgb565::new(8, 16, 8); // dim grey-green centre marker
+const CROSS:     Rgb565 = Rgb565::YELLOW;
+const FLASH:     Rgb565 = Rgb565::WHITE;
 
 const FONT_W: i32 = 10;
 const FONT_H: i32 = 20;
@@ -421,13 +422,28 @@ async fn render_task(
             }
         }
 
-        // Tap flash: white both buffers, invalidate snapshots so the
-        // next pass paints everything fresh.
+        // Tap flash: paint the back buffer white and flip. The flip
+        // toggles BSP-internal back/front, so mirror that here or the
+        // diff-based partial redraws after this point will be working
+        // against the wrong baseline.
+        //
+        // We also flip *back* afterwards using a second white-fill so
+        // both physical buffers are clean white before the heavy
+        // post-flash redraw begins. Without the second flip the
+        // following render iteration has to do a full-screen BG fill
+        // (460 KB PSRAM write) immediately after returning from
+        // sleep, and that has been observed to momentarily starve the
+        // bounce-buffer EOF ISR — producing a single-frame ~1/3
+        // vertical shift as the DMA loses alignment for one frame.
+        // Two clean buffers + two short fills give the panel pipeline
+        // a quiet 80 ms of identical content to resync against.
         if FLASH_REQ.try_take().is_some() {
             framebuffer.fill(FLASH.into_storage());
             framebuffer.flip();
             framebuffer.fill(FLASH.into_storage());
             framebuffer.flip();
+            // Two flips net zero — `back_is_a` mirror stays where it
+            // was. Both buffers now hold WHITE.
             Timer::after(Duration::from_millis(FLASH_MS)).await;
             a_drawn = Snapshot::empty();
             b_drawn = Snapshot::empty();
@@ -461,7 +477,17 @@ async fn render_task(
         let fresh = !back.initialised;
 
         if fresh {
-            framebuffer.fill(BG.into_storage());
+            // Row-at-a-time fill instead of `framebuffer.fill()`. The
+            // BSP's bulk `fill` is one giant `Cache_WriteBack_Addr`
+            // (~14 ms with interrupts effectively disabled), which is
+            // long enough to coalesce ~20 EOF firings of the
+            // bounce-buffer ISR. Coalesced EOFs lose alignment and
+            // produce a one-frame vertical shift after a tap flash.
+            // Per-row writebacks are ~10 µs each and the ISR fires
+            // happily between them.
+            for y in 0..HEIGHT {
+                framebuffer.draw_row_solid(y, 0..WIDTH, BG.into_storage());
+            }
         }
 
         let mut target = FbTarget(&framebuffer);
@@ -492,8 +518,16 @@ async fn render_task(
         if fresh || back.bubble != new.bubble {
             if !fresh {
                 draw_disc(&framebuffer, back.bubble.0, back.bubble.1, BUBBLE_R, BG.into_storage());
+                // Repaint the static centre reference where the old
+                // bubble erased it.
+                draw_centre_reference(&framebuffer, back.bubble.0, back.bubble.1);
             }
             draw_disc(&framebuffer, new.bubble.0, new.bubble.1, BUBBLE_R, BUBBLE.into_storage());
+        }
+        if fresh {
+            // Static centre crosshair behind the bubble — gives the
+            // eye an anchor so the bubble's offset reads as "tilt".
+            draw_centre_reference(&framebuffer, CENTRE_X + 999, CENTRE_Y + 999);
         }
 
         if fresh || back.touch != new.touch {
@@ -570,19 +604,57 @@ fn format_mdps(out: &mut heapless::String<12>, label: &str, mdps: i32) {
     let _ = core::fmt::write(out, format_args!("{} {}{}.{}", label, sign, whole, frac));
 }
 
-/// Map raw accel X/Y → screen pixels. Bubble centred at the
-/// geometric centre of the panel with a symmetric swing range
-/// that leaves clear gaps from the IMU readouts above and the
-/// TAPS row below.
+/// Map raw accel X/Y → screen pixels for a bubble-level display.
+///
+/// The QMI8658 on this carrier is mounted with the chip's axes
+/// rotated relative to the screen: chip +X points along the
+/// screen's *down* axis (so standing the board on its bottom edge
+/// reads AX = +1 g), chip +Y points along the screen's *left*
+/// axis (left side of screen down → AY = +1 g). To get a
+/// bubble-level metaphor — bubble moves to the *high* side,
+/// opposite gravity — we map:
+///
+/// - bubble screen-X = CENTRE_X + ay/SCALE   (chip +y → screen left → bubble right)
+/// - bubble screen-Y = CENTRE_Y − ax/SCALE   (chip +x → screen down → bubble up)
+///
+/// SCALE chosen so a ~15° tilt (≈ 0.26 g = 1064 raw at G8) puts
+/// the bubble about a third of the way to the edge.
 fn accel_to_screen(ax: i16, ay: i16) -> (i32, i32) {
-    const SCALE: i32 = 80;
+    const SCALE: i32 = 30;
     const Y_SWING: i32 = 40;
     const X_SWING: i32 = 60;
-    let dx = (ax as i32) / SCALE;
-    let dy = (ay as i32) / SCALE;
+    let dx = (ay as i32) / SCALE;
+    let dy = (ax as i32) / SCALE;
     let x = (CENTRE_X + dx).clamp(CENTRE_X - X_SWING, CENTRE_X + X_SWING);
-    let y = (CENTRE_Y - dy).clamp(CENTRE_Y - Y_SWING, CENTRE_Y + Y_SWING); // tilt-forward → up
+    let y = (CENTRE_Y - dy).clamp(CENTRE_Y - Y_SWING, CENTRE_Y + Y_SWING);
     (x, y)
+}
+
+/// Draw the static centre crosshair — a small `+` at (CENTRE_X,
+/// CENTRE_Y) that gives the bubble something to be "offset from".
+/// `skip_x` / `skip_y` are the bubble's current position; if the
+/// crosshair would land inside the bubble, suppress it so we don't
+/// flicker the cyan disc with grey pixels.
+fn draw_centre_reference(fb: &Framebuffer, skip_x: i32, skip_y: i32) {
+    const ARM: i32 = 8;
+    let dx = (CENTRE_X - skip_x).abs();
+    let dy = (CENTRE_Y - skip_y).abs();
+    if dx < BUBBLE_R + ARM && dy < BUBBLE_R + ARM {
+        // bubble is covering or near the centre — don't draw the
+        // reference, the bubble itself is the anchor.
+        return;
+    }
+    let c = REFERENCE.into_storage();
+    fb.draw_row_solid(
+        CENTRE_Y as usize,
+        (CENTRE_X - ARM) as usize..(CENTRE_X + ARM + 1) as usize,
+        c,
+    );
+    fb.draw_column(
+        CENTRE_X as usize,
+        (CENTRE_Y - ARM) as usize..(CENTRE_Y + ARM + 1) as usize,
+        c,
+    );
 }
 
 // ---------------------------------------------------------------------------
