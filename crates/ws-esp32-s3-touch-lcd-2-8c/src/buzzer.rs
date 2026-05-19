@@ -15,6 +15,12 @@ use crate::consts;
 use crate::pca9554::SharedPcaController;
 
 /// Handle to the on-board piezo buzzer.
+///
+/// `Clone + Copy` — the buzzer is logically a singleton on the
+/// chip, but the handle is just a `&'static` so multiple tasks can
+/// hold their own copy without coordination. The PCA9554
+/// controller's internal mutex serialises actual register writes.
+#[derive(Clone, Copy)]
 pub struct Buzzer {
     pca: &'static SharedPcaController,
 }

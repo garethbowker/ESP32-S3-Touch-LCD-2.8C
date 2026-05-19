@@ -11,7 +11,8 @@
 //! underlying [`pcf85063a::PCF85063`].
 
 pub use pcf85063a::{Error, PCF85063};
-pub use time::PrimitiveDateTime;
+#[allow(unused_imports)] // re-exported for consumer convenience
+pub use time::{Date, Month, PrimitiveDateTime, Time, Weekday};
 
 use crate::shared_bus::BoardI2cDevice;
 

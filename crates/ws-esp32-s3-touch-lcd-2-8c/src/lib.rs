@@ -89,9 +89,9 @@ mod backlight;
 mod buzzer;
 mod touch;
 #[cfg(feature = "rtc")]
-mod rtc;
+pub mod rtc;
 #[cfg(feature = "imu")]
-mod imu;
+pub mod imu;
 
 pub mod consts;
 
