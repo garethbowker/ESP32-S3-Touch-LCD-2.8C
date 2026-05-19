@@ -39,7 +39,11 @@
 //!
 //! 1. Brings up the I²C0 bus at 400 kHz on the board's SDA/SCL pins.
 //! 2. Configures the PCA9554 I/O expander (address `0x20`): bit 0 →
-//!    LCD reset, bit 1 → touch reset, bit 2 → ST7701 chip-select.
+//!    LCD reset (high), bit 1 → touch reset (high), bit 2 → ST7701
+//!    chip-select (high), bit 7 → on-board piezo (low, i.e. silent).
+//!    The PCA9554 powers up with every pin in input mode, so the
+//!    direction register *must* be written — not just the output
+//!    latch — for any of these signals to actually reach their pins.
 //! 3. Drives the ST7701 reset pulse and clocks out the panel's init
 //!    sequence over bit-banged 9-bit "3-wire" SPI.
 //! 4. Latches the GT911's I²C address to `0x5D` via the canonical
@@ -291,17 +295,30 @@ pub fn init(r: Resources<'static>) -> Result<Board<'static>, Error> {
         let mut pca = port_expander::dev::pca9554::Pca9554::new(dev, false, false, false);
         let pins = pca.split();
 
-        // Configure the three pins we use as outputs, starting at
-        // their "deasserted" levels. (`into_output_high` would do the
-        // same as set_high + into_output, but the order matters: we
-        // want them HIGH before they flip from input to output, to
-        // avoid a brief glitch.)
-        let mut lcd_rst = pins.io0;
-        let mut touch_rst = pins.io1;
-        let mut st7701_cs = pins.io2;
-        lcd_rst.set_high().map_err(|_| Error::Pca9554)?;
-        touch_rst.set_high().map_err(|_| Error::Pca9554)?;
-        st7701_cs.set_high().map_err(|_| Error::Pca9554)?;
+        // Drive the three control lines high *and* flip them to
+        // output mode. `into_output_high` writes the output latch
+        // before the direction register, so the pin transitions
+        // input → output already at HIGH and the panel/touch never
+        // see a glitch low.
+        //
+        // Using `set_high` alone (which `Pin<QuasiBidirectional, _>`
+        // permits) only writes the OutputPort latch and leaves the
+        // Configuration register at its 0xFF power-on default — all
+        // pins stay electrically high-Z. That works *after* a
+        // software reset (the PCA9554 keeps its registers), but on a
+        // cold boot the LCD reset pulse never reaches the ST7701 and
+        // the panel stays in whatever state it was last left in
+        // (usually black). v1.0.0 had that bug.
+        let lcd_rst       = pins.io0.into_output_high().map_err(|_| Error::Pca9554)?;
+        let mut touch_rst = pins.io1.into_output_high().map_err(|_| Error::Pca9554)?;
+        let st7701_cs     = pins.io2.into_output_high().map_err(|_| Error::Pca9554)?;
+
+        // Silence the on-board piezo. The factory firmware leaves
+        // PCA9554 io7 high (= constant tone); without claiming the
+        // pin here, the BSP would inherit that state across resets.
+        // `into_output` clears the output latch before flipping the
+        // direction, so the buzzer never beeps on boot.
+        let _buzzer = pins.io7.into_output().map_err(|_| Error::Pca9554)?;
 
         // ST7701 init.
         //
