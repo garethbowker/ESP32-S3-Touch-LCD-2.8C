@@ -10,7 +10,7 @@
 //! [`Imu::init`] once after [`crate::init`] returns, then uses the
 //! driver normally.
 
-pub use ph_qmi8658::{Config, Error, Qmi8658I2c};
+pub use ph_qmi8658::{Config, Error, GyroConfig, GyroRange, Qmi8658I2c};
 use embedded_hal_async::delay::DelayNs;
 
 use crate::consts;
@@ -26,8 +26,24 @@ pub struct Imu {
 
 impl Imu {
     pub(crate) fn new(bus: BoardI2cDevice) -> Self {
-        let config = Config::new();
-        let i2c_config = ph_qmi8658::I2cConfig::new(consts::i2c::QMI8658_ADDR);
+        // `ph-qmi8658`'s default GyroRange is Dps512, which is wildly
+        // coarse for handheld use — the chip's per-LSB jitter dominates
+        // anything below ~5 °/s in physical units. Waveshare's own
+        // reference firmware ships GYR_RANGE_64DPS (Dps64 here =
+        // 512 LSB/dps), and that's a much better default for this
+        // carrier. Apps that need to detect fast spins can override.
+        let config = Config::new()
+            .with_gyro_config(GyroConfig::default().with_range(GyroRange::Dps64));
+
+        // `ph-qmi8658`'s I²C defaults expect big-endian register reads
+        // (CTRL1.BE=1), but the QMI8658's power-on default is
+        // little-endian. Empirically the driver doesn't reliably
+        // write CTRL1.BE on every init path, so reading default-config
+        // little-endian data with big-endian decoding produces
+        // byte-swapped (and wildly wrong-looking) raw samples. Pin
+        // both ends to little-endian.
+        let i2c_config = ph_qmi8658::I2cConfig::new(consts::i2c::QMI8658_ADDR)
+            .with_big_endian(false);
         let inner = Qmi8658I2c::with_i2c_config(bus, None, None, config, i2c_config);
         Self { inner }
     }
