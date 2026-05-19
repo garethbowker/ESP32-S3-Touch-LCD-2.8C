@@ -18,19 +18,42 @@ name              = "hello_touch"
 required-features = ["_example-runtime"]
 
 [features]
+default = ["rtc", "imu"]
+# First-class RTC handle: `Board::rtc` wraps `pcf85063a` driver.
+rtc = ["dep:pcf85063a", "dep:time"]
+# First-class IMU handle: `Board::imu` wraps `ph-qmi8658` driver.
+imu = ["dep:ph-qmi8658"]
 # Internal — gates whether the example's runtime dependencies are
 # pulled in. End users don't need this; it's flipped automatically by
 # the example invocation.
 _example-runtime = []
 
 [dependencies]
-st7701           = { version = "1.0", path = "../st7701" }
-gt911            = { version = "0.3", default-features = false }
-port-expander    = "0.6"
-embedded-hal     = { workspace = true }
-embedded-hal-bus = "0.3"
-critical-section = "1"
-log              = "0.4"
+st7701              = { version = "1.0", path = "../st7701" }
+gt911               = { version = "0.3", default-features = false }
+port-expander       = "0.6"
+embedded-hal        = { workspace = true }
+embedded-hal-async  = "1.0"
+embedded-hal-bus    = "0.3"
+critical-section    = "1"
+log                 = "0.4"
+
+# Async I²C bus sharing for the on/off-board peripherals.
+embassy-sync          = "0.8"
+embassy-embedded-hal  = "0.6"
+embassy-time          = "0.4"
+static_cell           = "2.1"
+
+# Optional async drivers for the on-board RTC and IMU. Pulled in by
+# default features; disable `rtc`/`imu` to drop them and the bytes
+# they take.
+pcf85063a   = { version = "0.1", optional = true }
+ph-qmi8658  = { version = "0.1", optional = true }
+
+# Re-exported from `crate::Rtc` so consumers don't have to chase
+# `time` version compatibility with `pcf85063a`. Behind the `rtc`
+# feature since nothing else uses it.
+time        = { version = "0.3", default-features = false, optional = true }
 
 # `esp-hal` is pinned to `1.0.0-rc.0` because `esp-hal-embassy` still
 # depends on the hidden `__esp_hal_embassy` feature that `esp-hal`

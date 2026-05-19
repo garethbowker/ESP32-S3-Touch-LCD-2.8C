@@ -82,14 +82,36 @@
 
 mod bounce_buffer;
 mod framebuffer;
+mod pca9554;
+mod shared_bus;
+
+mod backlight;
+mod buzzer;
+mod touch;
+#[cfg(feature = "rtc")]
+mod rtc;
+#[cfg(feature = "imu")]
+mod imu;
 
 pub mod consts;
+
+pub use backlight::Backlight;
+pub use buzzer::Buzzer;
+pub use shared_bus::{BoardI2cDevice, SharedI2c};
+pub use touch::{Point, TouchPoller};
+#[cfg(feature = "rtc")]
+pub use rtc::Rtc;
+#[cfg(feature = "imu")]
+pub use imu::Imu;
 
 use core::cell::RefCell;
 use core::convert::Infallible;
 
 use embedded_hal::digital::{ErrorType, OutputPin};
 use embedded_hal_bus::i2c::RefCellDevice;
+
+use embassy_sync::mutex::Mutex;
+use static_cell::StaticCell;
 
 use esp_hal::{
     delay::Delay,
@@ -104,7 +126,6 @@ use esp_hal::{
     },
     peripherals,
     time::Rate,
-    Blocking,
 };
 
 // Re-export the underlying driver crates so consumers don't need to
@@ -239,36 +260,68 @@ macro_rules! take_resources {
 // Public board handle
 // ---------------------------------------------------------------------------
 
-/// What [`init`] hands back: everything you need to drive the panel
-/// and the touch controller after the board is alive, plus the
-/// off-board peripherals' pins for consumer use.
+/// What [`init`] hands back. Every on-board peripheral the BSP can
+/// drive itself is exposed as a first-class handle with its own
+/// methods — no need to thread I²C buses or scratch buffers
+/// through your tasks. Pass-through fields ([`Self::sd_pins`],
+/// [`Self::battery_adc`]) cover the peripherals that don't have an
+/// async-Rust driver yet.
+///
+/// `Board` has no lifetime parameter — everything inside is
+/// `'static`. The shared I²C bus lives in a `StaticCell` owned by
+/// the BSP, and `esp_hal::init` returns peripherals with `'static`
+/// lifetime already.
 ///
 /// Marked `#[non_exhaustive]` so future additions won't break
 /// pattern-matching consumers.
 #[non_exhaustive]
-pub struct Board<'d> {
+pub struct Board {
     /// CPU-side handle to the PSRAM framebuffer. Write pixels here;
     /// they appear on the panel within one frame.
     pub framebuffer: Framebuffer,
-    /// I²C0 bus, owned. Borrowed `&mut` per-call by the GT911 driver
-    /// — see [`Self::touch`]. The PCF85063 RTC and QMI8658 IMU also
-    /// live on this bus (see [`consts::i2c`]); consumers wanting to
-    /// drive them can borrow it the same way the GT911 does.
-    pub i2c: I2c<'d, Blocking>,
-    /// GT911 touch driver. Stateless; call `touch.get_touch(&mut
-    /// board.i2c)` to poll.
-    pub touch: gt911::Gt911Blocking<I2c<'d, Blocking>>,
-    /// Backlight GPIO, currently driven high. Drive low to blank, or
-    /// reconfigure as an LEDC channel for PWM dimming.
-    pub backlight: Output<'d>,
+
+    /// The shared I²C bus. Build an
+    /// [`I2cDevice`](embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice)
+    /// per consumer to use it from independent tasks. The BSP's
+    /// own peripherals already hold their own clones; this handle
+    /// is for anything *you* want to put on the bus.
+    pub i2c: &'static SharedI2c,
+
+    /// GT911 capacitive touch poller. Self-contained: owns its
+    /// `I2cDevice` clone and scratch buffer. Move into a task and
+    /// call [`TouchPoller::poll`] in a loop.
+    pub touch: TouchPoller,
+
+    /// On-board piezo buzzer. Left silent by [`init`]; pulse with
+    /// [`Buzzer::beep_for`] or drive directly with
+    /// [`Buzzer::on`] / [`Buzzer::off`].
+    pub buzzer: Buzzer,
+
+    /// LCD backlight, currently full-on. Drive low for blank, or
+    /// consume into a raw `Output` via [`Backlight::into_inner`]
+    /// to reconfigure as an LEDC PWM channel.
+    pub backlight: Backlight,
+
+    /// PCF85063A real-time clock. Reads/writes datetime via I²C —
+    /// already on the shared bus.
+    #[cfg(feature = "rtc")]
+    pub rtc: Rtc,
+
+    /// QMI8658C 6-axis IMU. Call [`Imu::init`] once before reading
+    /// samples — the driver's init handshake is async and isn't
+    /// run by [`init`].
+    #[cfg(feature = "imu")]
+    pub imu: Imu,
+
     /// Raw GPIO4 for the battery-divider sense. The BSP doesn't
     /// configure the ADC — bring up `Adc<ADC1>` yourself and pass
     /// this pin. See [`consts::battery`] for the channel/attenuation
     /// to use and the divider ratio.
-    pub battery_adc: peripherals::GPIO4<'d>,
+    pub battery_adc: peripherals::GPIO4<'static>,
+
     /// SD card pins, released after [`init`] used GPIO1/2 for the
     /// ST7701 init bit-bang. See [`SdPins`] for caveats.
-    pub sd_pins: SdPins<'d>,
+    pub sd_pins: SdPins,
 }
 
 /// SD/MMC pins exposed by the BSP for consumer-managed SD card
@@ -280,17 +333,19 @@ pub struct Board<'d> {
 /// → SD use) is already done, so a future driver only needs the
 /// protocol code, not the BSP plumbing.
 ///
-/// The SD card's D3 line runs through the PCA9554 expander —
-/// drive [`consts::pca9554::SD_D3_EN_BIT`] high to enable. See
-/// [`consts::sd`] for the GPIO-numbering reference.
+/// The SD card's D3 line runs through the PCA9554 expander — see
+/// [`consts::pca9554::SD_D3_EN_BIT`]. When a future SD driver
+/// lands the BSP will expose a first-class `SdCard` handle that
+/// drives this bit itself; for now consumers needing it can build
+/// a `port_expander::Pca9554` on top of [`Board::i2c`].
 #[non_exhaustive]
-pub struct SdPins<'d> {
+pub struct SdPins {
     /// SD CLK (GPIO2).
-    pub clk: peripherals::GPIO2<'d>,
+    pub clk: peripherals::GPIO2<'static>,
     /// SD CMD (GPIO1).
-    pub cmd: peripherals::GPIO1<'d>,
+    pub cmd: peripherals::GPIO1<'static>,
     /// SD D0 (GPIO42).
-    pub d0:  peripherals::GPIO42<'d>,
+    pub d0:  peripherals::GPIO42<'static>,
 }
 
 /// What can go wrong during [`init`].
@@ -327,7 +382,7 @@ pub enum Error {
 /// Bring the board up.
 ///
 /// See the module docs for what's configured and the call-once caveat.
-pub fn init(r: Resources<'static>) -> Result<Board<'static>, Error> {
+pub fn init(r: Resources<'static>) -> Result<Board, Error> {
     let delay = Delay::new();
 
     // ----- I²C bus + PCA9554 setup ------------------------------------------
@@ -430,9 +485,9 @@ pub fn init(r: Resources<'static>) -> Result<Board<'static>, Error> {
     // dropped here. The cell is exclusively ours again.
     let mut i2c = i2c_cell.into_inner();
 
-    // ----- GT911 driver -----------------------------------------------------
-    let touch = gt911::Gt911Blocking::default();
-    touch.init(&mut i2c).map_err(|_| Error::Gt911)?;
+    // ----- GT911 init (still blocking — one-shot at boot) ------------------
+    let touch_init = gt911::Gt911Blocking::default();
+    touch_init.init(&mut i2c).map_err(|_| Error::Gt911)?;
 
     // ----- DPI peripheral ---------------------------------------------------
     // Timings from `esp-arduino-libs/ESP32_Display_Panel`'s
@@ -512,13 +567,58 @@ pub fn init(r: Resources<'static>) -> Result<Board<'static>, Error> {
     unsafe { bounce_buffer::enable_eof_interrupt() };
 
     // ----- Backlight on -----------------------------------------------------
-    let backlight = Output::new(r.backlight, Level::High, OutputConfig::default());
+    let backlight_pin = Output::new(r.backlight, Level::High, OutputConfig::default());
+
+    // ----- Switch I²C to async + share via mutex ---------------------------
+    //
+    // Up to this point the I²C bus was blocking, which is exactly what
+    // we want for the synchronous init dance (no executor running). For
+    // runtime we want async + shareable across tasks (touch poll,
+    // buzzer, RTC, IMU, whatever the consumer adds). esp-hal supports
+    // the conversion via `I2c::into_async()`, after which we wrap in an
+    // embassy `Mutex` and stash that in a `StaticCell` so the resulting
+    // `&'static SharedI2c` can be cloned cheaply into each consumer's
+    // `I2cDevice`.
+    static I2C_BUS: StaticCell<SharedI2c> = StaticCell::new();
+    let bus: &'static SharedI2c = I2C_BUS.init(Mutex::new(i2c.into_async()));
+
+    // ----- PCA9554 runtime controller --------------------------------------
+    //
+    // Buzzer (and SD-D3 enable, once that lands) need to manipulate
+    // PCA9554 register bits without clobbering each other's cached
+    // state. The controller does true read-modify-write of the chip
+    // registers, and the surrounding `Mutex` closes the RMW window
+    // across tasks. One instance for the whole BSP.
+    static PCA_CTRL: StaticCell<pca9554::SharedPcaController> = StaticCell::new();
+    let pca = PCA_CTRL.init(Mutex::new(pca9554::Pca9554Controller::new(
+        embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice::new(bus),
+        consts::i2c::PCA9554_ADDR,
+    )));
+
+    // ----- Build the first-class peripheral handles ------------------------
+    let touch_driver = gt911::Gt911::default();
+    let touch_bus = embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice::new(bus);
+    let touch = TouchPoller::new(touch_driver, touch_bus);
+
+    let buzzer = Buzzer::new(pca);
+    let backlight = Backlight::new(backlight_pin);
+
+    #[cfg(feature = "rtc")]
+    let rtc = Rtc::new(embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice::new(bus));
+
+    #[cfg(feature = "imu")]
+    let imu = Imu::new(embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice::new(bus));
 
     Ok(Board {
         framebuffer,
-        i2c,
+        i2c: bus,
         touch,
+        buzzer,
         backlight,
+        #[cfg(feature = "rtc")]
+        rtc,
+        #[cfg(feature = "imu")]
+        imu,
         battery_adc: r.battery_adc,
         sd_pins: SdPins {
             clk: sd_clk,

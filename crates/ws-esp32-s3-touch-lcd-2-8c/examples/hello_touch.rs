@@ -83,7 +83,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let mut back_is_a = true;
 
     loop {
-        let target: Option<(u16, u16)> = match board.touch.get_touch(&mut board.i2c) {
+        let target: Option<(u16, u16)> = match board.touch.poll().await {
             Ok(Some(p)) => {
                 let xy = (p.x, p.y);
                 press = Some(match press.take() {
