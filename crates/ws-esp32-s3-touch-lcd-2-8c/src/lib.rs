@@ -61,6 +61,12 @@
 //! writes via [`Framebuffer::write_row`] / [`Framebuffer::fill`] become
 //! visible within one frame (~23 ms at 12 MHz PCLK).
 //!
+//! The returned [`Board`] also exposes pins for the off-board
+//! peripherals the BSP doesn't drive itself: the SD card slot
+//! ([`Board::sd_pins`]) and the battery-voltage divider
+//! ([`Board::battery_adc`]). The PCF85063 RTC and QMI8658 IMU sit on
+//! the I²C bus already (see [`consts::i2c`]); bring your own driver.
+//!
 //! ## Caveats
 //!
 //! - **Must be called at most once per boot.** The bounce-buffer
@@ -76,6 +82,8 @@
 
 mod bounce_buffer;
 mod framebuffer;
+
+pub mod consts;
 
 use core::cell::RefCell;
 use core::convert::Infallible;
@@ -117,8 +125,10 @@ pub use framebuffer::{
 /// All board peripherals and pins consumed by [`init`].
 ///
 /// Populated either by hand from an `esp_hal::peripherals::Peripherals`,
-/// or via [`Resources::take`] which destructures the standard pinout
-/// for you.
+/// or — preferred — via the [`take_resources!`] macro which
+/// destructures the standard pinout for you. Future BSP releases
+/// may add fields here; the macro is owned by the BSP and updated
+/// in lockstep, so consumers using it are insulated.
 #[allow(missing_docs)]
 pub struct Resources<'d> {
     pub i2c0:        peripherals::I2C0<'d>,
@@ -128,6 +138,10 @@ pub struct Resources<'d> {
 
     pub sda:         peripherals::GPIO15<'d>,
     pub scl:         peripherals::GPIO7<'d>,
+    // GPIO2 (`st7701_sck`) and GPIO1 (`st7701_mosi`) double as SD CLK
+    // and SD CMD — see [`consts::sd`]. `init` only uses them as
+    // outputs during the ST7701 bit-bang and returns the originals
+    // via [`Board::sd_pins`].
     pub st7701_sck:  peripherals::GPIO2<'d>,
     pub st7701_mosi: peripherals::GPIO1<'d>,
     pub touch_int:   peripherals::GPIO16<'d>,
@@ -139,6 +153,12 @@ pub struct Resources<'d> {
     pub pclk:        peripherals::GPIO41<'d>,
 
     pub data: DpiDataPins<'d>,
+
+    /// Battery-divider sense (ADC1 channel 3). Passed through to
+    /// [`Board::battery_adc`]; the BSP itself doesn't touch the ADC.
+    pub battery_adc: peripherals::GPIO4<'d>,
+    /// SD card data line 0. Passed through to [`Board::sd_pins`].
+    pub sd_d0:       peripherals::GPIO42<'d>,
 }
 
 /// The 16 DPI data pins.
@@ -209,6 +229,8 @@ macro_rules! take_resources {
                 g0: $p.GPIO14, g1: $p.GPIO13, g2: $p.GPIO12, g3: $p.GPIO11, g4: $p.GPIO10, g5: $p.GPIO9,
                 r0: $p.GPIO46, r1: $p.GPIO3,  r2: $p.GPIO8,  r3: $p.GPIO18, r4: $p.GPIO17,
             },
+            battery_adc: $p.GPIO4,
+            sd_d0:       $p.GPIO42,
         }
     };
 }
@@ -218,13 +240,20 @@ macro_rules! take_resources {
 // ---------------------------------------------------------------------------
 
 /// What [`init`] hands back: everything you need to drive the panel
-/// and the touch controller after the board is alive.
+/// and the touch controller after the board is alive, plus the
+/// off-board peripherals' pins for consumer use.
+///
+/// Marked `#[non_exhaustive]` so future additions won't break
+/// pattern-matching consumers.
+#[non_exhaustive]
 pub struct Board<'d> {
     /// CPU-side handle to the PSRAM framebuffer. Write pixels here;
     /// they appear on the panel within one frame.
     pub framebuffer: Framebuffer,
     /// I²C0 bus, owned. Borrowed `&mut` per-call by the GT911 driver
-    /// — see [`Self::touch`].
+    /// — see [`Self::touch`]. The PCF85063 RTC and QMI8658 IMU also
+    /// live on this bus (see [`consts::i2c`]); consumers wanting to
+    /// drive them can borrow it the same way the GT911 does.
     pub i2c: I2c<'d, Blocking>,
     /// GT911 touch driver. Stateless; call `touch.get_touch(&mut
     /// board.i2c)` to poll.
@@ -232,6 +261,36 @@ pub struct Board<'d> {
     /// Backlight GPIO, currently driven high. Drive low to blank, or
     /// reconfigure as an LEDC channel for PWM dimming.
     pub backlight: Output<'d>,
+    /// Raw GPIO4 for the battery-divider sense. The BSP doesn't
+    /// configure the ADC — bring up `Adc<ADC1>` yourself and pass
+    /// this pin. See [`consts::battery`] for the channel/attenuation
+    /// to use and the divider ratio.
+    pub battery_adc: peripherals::GPIO4<'d>,
+    /// SD card pins, released after [`init`] used GPIO1/2 for the
+    /// ST7701 init bit-bang. See [`SdPins`] for caveats.
+    pub sd_pins: SdPins<'d>,
+}
+
+/// SD/MMC pins exposed by the BSP for consumer-managed SD card
+/// support.
+///
+/// **`esp-hal` 1.0.0-rc.0 doesn't yet expose an SDHOST driver for
+/// the S3**, so these pins can't actually be wired up from pure
+/// Rust today — but the BSP's pin-ownership handoff (ST7701 init
+/// → SD use) is already done, so a future driver only needs the
+/// protocol code, not the BSP plumbing.
+///
+/// The SD card's D3 line runs through the PCA9554 expander —
+/// drive [`consts::pca9554::SD_D3_EN_BIT`] high to enable. See
+/// [`consts::sd`] for the GPIO-numbering reference.
+#[non_exhaustive]
+pub struct SdPins<'d> {
+    /// SD CLK (GPIO2).
+    pub clk: peripherals::GPIO2<'d>,
+    /// SD CMD (GPIO1).
+    pub cmd: peripherals::GPIO1<'d>,
+    /// SD D0 (GPIO42).
+    pub d0:  peripherals::GPIO42<'d>,
 }
 
 /// What can go wrong during [`init`].
@@ -280,10 +339,20 @@ pub fn init(r: Resources<'static>) -> Result<Board<'static>, Error> {
     .with_sda(r.sda)
     .with_scl(r.scl);
 
-    // ST7701 init pins (bit-banged 3-wire SPI). Both go high-Z after
-    // init returns; we deliberately don't bother reclaiming them.
-    let sck = Output::new(r.st7701_sck, Level::Low, OutputConfig::default());
-    let mosi = Output::new(r.st7701_mosi, Level::Low, OutputConfig::default());
+    // ST7701 init pins (bit-banged 3-wire SPI).
+    //
+    // GPIO2 / GPIO1 are *shared* with the SD card's CLK/CMD lines on
+    // this carrier. We need them as `Output` for the init bit-bang
+    // and then have to hand them back to the consumer in
+    // `Board::sd_pins`. `Peripheral::reborrow` creates a
+    // shorter-lifetime peripheral handle that the `Output` consumes;
+    // when the `Output` is dropped at the end of the init scope, the
+    // reborrow goes with it and the originals (`sd_clk`, `sd_cmd`)
+    // are usable again.
+    let mut sd_clk = r.st7701_sck;
+    let mut sd_cmd = r.st7701_mosi;
+    let sck  = Output::new(sd_clk.reborrow(), Level::Low, OutputConfig::default());
+    let mosi = Output::new(sd_cmd.reborrow(), Level::Low, OutputConfig::default());
 
     // The PCA9554, the ST7701 init, and the GT911 reset dance all
     // share the I²C bus, and need to finish before the GT911 driver
@@ -445,7 +514,18 @@ pub fn init(r: Resources<'static>) -> Result<Board<'static>, Error> {
     // ----- Backlight on -----------------------------------------------------
     let backlight = Output::new(r.backlight, Level::High, OutputConfig::default());
 
-    Ok(Board { framebuffer, i2c, touch, backlight })
+    Ok(Board {
+        framebuffer,
+        i2c,
+        touch,
+        backlight,
+        battery_adc: r.battery_adc,
+        sd_pins: SdPins {
+            clk: sd_clk,
+            cmd: sd_cmd,
+            d0:  r.sd_d0,
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
