@@ -57,7 +57,7 @@ log                 = "0.4"
 # Async I²C bus sharing for the on/off-board peripherals.
 embassy-sync          = "0.8"
 embassy-embedded-hal  = "0.6"
-embassy-time          = "0.4"
+embassy-time          = "0.5"
 static_cell           = "2.1"
 
 # Optional async drivers for the on-board RTC and IMU. Pulled in by
@@ -71,29 +71,22 @@ ph-qmi8658  = { version = "0.1", optional = true }
 # feature since nothing else uses it.
 time        = { version = "0.3", default-features = false, optional = true }
 
-# `esp-hal` is pinned to `1.0.0-rc.0` because `esp-hal-embassy` still
-# depends on the hidden `__esp_hal_embassy` feature that `esp-hal`
-# 1.0.0-stable removed (2025-10-30). Until a re-paired
-# `esp-hal-embassy` lands on crates.io, bumping to esp-hal 1.1.x
-# breaks the embassy integration. The other esp-rs crates have
-# 2026-04-16 releases that *do* work with 1.1.x, but pulling them in
-# without esp-hal-embassy isn't viable.
-esp-hal = { version = "=1.0.0-rc.0", features = ["esp32s3", "unstable", "psram"] }
+# `unstable` is needed for the LCD_CAM DPI driver, PSRAM and the raw
+# GDMA access in the bounce-buffer ring.
+esp-hal = { version = "~1.2.2", features = ["esp32s3", "unstable"] }
 
 # Runtime crates only the example uses. Not pulled in by default; the
 # example declares them as `required-features`. Library consumers
 # choose their own versions.
 #
-# Versions chosen to match the latest cohort that's still compatible
-# with esp-hal 1.0.0-rc.0 (the 2025-10-14 release set + a couple of
-# patch updates that landed after).
+# Versions are the release set that pairs with esp-hal 1.2.
 [dev-dependencies]
-esp-hal-embassy        = { version = "0.9.1",  features = ["esp32s3"] }
-esp-backtrace          = { version = "0.18.1", features = ["esp32s3", "panic-handler", "println"] }
-esp-println            = { version = "0.16.1", features = ["esp32s3", "log-04"] }
-esp-bootloader-esp-idf = { version = "0.3",    features = ["esp32s3"] }
-esp-alloc              = "0.9"
-embassy-executor       = "0.7"
-embassy-time           = "0.4"
+esp-rtos               = { version = "0.4.0",  features = ["esp32s3", "embassy", "log-04"] }
+esp-backtrace          = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-println            = { version = "0.18.0", features = ["esp32s3", "log-04"] }
+esp-bootloader-esp-idf = { version = "0.6.0",  features = ["esp32s3"] }
+esp-alloc              = { version = "0.11.0", features = ["esp32s3"] }
+embassy-executor       = "0.10.0"
+embassy-time           = "0.5"
 embedded-graphics      = "0.8"
 heapless               = "0.8"

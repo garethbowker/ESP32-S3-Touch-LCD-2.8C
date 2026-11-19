@@ -13,7 +13,7 @@ This workspace publishes two crates. Pick the one(s) you need:
 | Crate | What it gives you | Depends on |
 |---|---|---|
 | [`st7701`](crates/st7701) | Generic Sitronix ST7701 init driver — bit-banged 9-bit 3-wire SPI over `embedded-hal` `OutputPin` + `DelayNs`. Includes the Waveshare-2.8C init sequence as a preset. Works on **any HAL**. | `embedded-hal 1.0` |
-| [`ws-esp32-s3-touch-lcd-2-8c`](crates/ws-esp32-s3-touch-lcd-2-8c) | Board-support package for this exact board. One call wires up: ST7701 init, PCA9554 I/O expander, GT911 touch reset, DPI peripheral, PSRAM framebuffer, and the DRAM bounce-buffer ring needed to avoid the PSRAM→DPI drift on this SoC. | `esp-hal 1.0.0-rc.0`, `st7701`, [`port-expander`](https://crates.io/crates/port-expander), [`gt911`](https://crates.io/crates/gt911) |
+| [`ws-esp32-s3-touch-lcd-2-8c`](crates/ws-esp32-s3-touch-lcd-2-8c) | Board-support package for this exact board. One call wires up: ST7701 init, PCA9554 I/O expander, GT911 touch reset, DPI peripheral, PSRAM framebuffer, and the DRAM bounce-buffer ring needed to avoid the PSRAM→DPI drift on this SoC. | `esp-hal 1.2`, `st7701`, [`port-expander`](https://crates.io/crates/port-expander), [`gt911`](https://crates.io/crates/gt911) |
 
 Existing community crates cover the other two chips on the board:
 

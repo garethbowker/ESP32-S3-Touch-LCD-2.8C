@@ -57,10 +57,10 @@
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use esp_hal::dma::{
-    BurstConfig, DmaDescriptor, DmaTxBuffer, Owner, Preparation, TransferDirection,
+    BurstConfig, DmaDescriptor, DmaTxBuffer, Owner, Preparation,
 };
-use esp_hal::interrupt::{self, Priority};
-use esp_hal::peripherals::Interrupt;
+use esp_hal::interrupt::{self, InterruptHandler, Priority};
+use esp_hal::peripherals::{Interrupt, DMA};
 
 use crate::framebuffer::{self, WIDTH};
 
@@ -228,13 +228,13 @@ impl BounceRing {
 
 unsafe impl DmaTxBuffer for BounceRing {
     type View = Self;
+    type Final = Self;
 
     fn prepare(&mut self) -> Preparation {
         Preparation {
             start: self.head,
             // DMA reads DRAM bounce buffers only; never PSRAM.
             accesses_psram: false,
-            direction: TransferDirection::Out,
             burst_transfer: BurstConfig::default(),
             // Owner bit is set to DMA on every descriptor at setup
             // time and not maintained by hardware in this mode.
@@ -247,7 +247,7 @@ unsafe impl DmaTxBuffer for BounceRing {
         self
     }
 
-    fn from_view(view: Self::View) -> Self {
+    fn from_view(view: Self::View) -> Self::Final {
         view
     }
 }
@@ -280,27 +280,28 @@ pub fn is_flip_pending() -> bool {
 /// interrupt vector for `DMA_OUT_CH0`. Must be called from outside any
 /// interrupt context, and only after the DPI transfer has been
 /// started so that PSRAM writes from the framebuffer are visible.
-pub unsafe fn enable_eof_interrupt() { unsafe {
-    interrupt::bind_interrupt(Interrupt::DMA_OUT_CH0, eof_isr_trampoline);
-    interrupt::enable(Interrupt::DMA_OUT_CH0, Priority::Priority2)
-        .expect("DMA_OUT_CH0 enable");
+pub unsafe fn enable_eof_interrupt() {
+    // `bind_handler` also enables the interrupt at the given priority.
+    interrupt::bind_handler(
+        Interrupt::DMA_OUT_CH0,
+        InterruptHandler::new(eof_isr_trampoline, Priority::Priority2),
+    );
 
-    let dma = &*esp_hal::peripherals::DMA::PTR;
-    dma.ch(0)
+    DMA::regs()
+        .ch(0)
         .out_int()
         .ena()
         .modify(|_, w| w.out_eof().set_bit());
-}}
+}
 
-unsafe extern "C" fn eof_isr_trampoline() {
+extern "C" fn eof_isr_trampoline() {
     eof_isr();
 }
 
 /// EOF interrupt body. Fires once per [`HALF_BYTES`] of DMA progress
 /// (roughly every 640 µs at 12 MHz PCLK / 16-line halves).
 fn eof_isr() {
-    // SAFETY: GDMA register block is a fixed-address singleton.
-    let dma = unsafe { &*esp_hal::peripherals::DMA::PTR };
+    let dma = DMA::regs();
 
     // Confirm OUT_EOF on channel 0 actually fired.
     if !dma.ch(0).out_int().st().read().out_eof().bit_is_set() {

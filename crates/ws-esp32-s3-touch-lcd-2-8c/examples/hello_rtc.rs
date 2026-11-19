@@ -27,19 +27,14 @@ use ws_esp32_s3_touch_lcd_2_8c::{
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[esp_hal_embassy::main]
+#[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) {
-    let peripherals = esp_hal::init(
-        esp_hal::Config::default().with_psram(esp_hal::psram::PsramConfig {
-            size: esp_hal::psram::PsramSize::Size(8 * 1024 * 1024),
-            ..Default::default()
-        }),
-    );
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
-    esp_hal_embassy::init(timg0.timer0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     esp_println::logger::init_logger_from_env();
 
