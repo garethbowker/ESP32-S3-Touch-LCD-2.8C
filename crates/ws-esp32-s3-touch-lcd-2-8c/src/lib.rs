@@ -482,9 +482,12 @@ pub fn init(r: Resources<'static>) -> Result<Board, Error> {
         // Chip needs ~200 ms post-release before it answers I²C.
         delay.delay_millis(200);
         touch_int.set_high();
-        // Drop the Output to release INT to high-Z; from now on the
-        // GT911 owns the line (and drives it low to flag new data).
-        drop(touch_int);
+        // Release INT to a floating input: from now on the GT911 owns
+        // the line and drives it low to flag new data. Dropping the
+        // `Output` would leave the pin driven high, fighting the GT911.
+        let mut touch_int = touch_int.into_flex();
+        touch_int.set_output_enable(false);
+        touch_int.set_input_enable(true);
     }
     // PCA9554, RefCellDevice, and the borrow of `i2c_cell` are all
     // dropped here. The cell is exclusively ours again.
