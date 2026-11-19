@@ -17,12 +17,12 @@ artefacts on this SoC.
 ```toml
 [dependencies]
 ws-esp32-s3-touch-lcd-2-8c = "1.0"
-esp-hal           = { version = "=1.0.0-rc.0", features = ["esp32s3", "unstable", "psram"] }
-esp-hal-embassy   = { version = "=0.9.0",      features = ["esp32s3"] }
-esp-backtrace     = { version = "=0.17.0",     features = ["esp32s3", "panic-handler", "println"] }
-esp-println       = { version = "=0.15.0",     features = ["esp32s3", "log-04"] }
-esp-bootloader-esp-idf = { version = "=0.2.0", features = ["esp32s3"] }
-esp-alloc         = "=0.8.0"
+esp-hal           = { version = "~1.2.2",      features = ["esp32s3", "unstable"] }
+esp-rtos          = { version = "0.4.0",       features = ["esp32s3", "embassy"] }
+esp-backtrace     = { version = "0.20.0",      features = ["esp32s3", "panic-handler", "println"] }
+esp-println       = { version = "0.18.0",      features = ["esp32s3", "log-04"] }
+esp-bootloader-esp-idf = { version = "0.6.0",  features = ["esp32s3"] }
+esp-alloc         = { version = "0.11.0",      features = ["esp32s3"] }
 ```
 
 ```rust,no_run
@@ -35,19 +35,14 @@ use ws_esp32_s3_touch_lcd_2_8c as bsp;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[esp_hal_embassy::main]
+#[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) {
-    let peripherals = esp_hal::init(
-        esp_hal::Config::default().with_psram(esp_hal::psram::PsramConfig {
-            size: esp_hal::psram::PsramSize::Size(8 * 1024 * 1024),
-            ..Default::default()
-        }),
-    );
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
-    esp_hal_embassy::init(timg0.timer0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let mut board = bsp::init(bsp::take_resources!(peripherals))
         .expect("board init");
@@ -66,8 +61,8 @@ async fn main(_spawner: embassy_executor::Spawner) {
 }
 ```
 
-You'll also need a `.cargo/config.toml` with `target = "xtensa-esp32s3-none-elf"`,
-`build-std`, and `ESP_HAL_CONFIG_PSRAM_MODE = "octal"` — see the
+You'll also need a `.cargo/config.toml` with `target = "xtensa-esp32s3-none-elf"`
+and `build-std` — see the
 [`hello_touch`](examples/hello_touch.rs) example for a complete project layout.
 
 ## What `init` does
@@ -79,7 +74,8 @@ You'll also need a `.cargo/config.toml` with `target = "xtensa-esp32s3-none-elf"
    sequence over bit-banged 9-bit "3-wire" SPI.
 4. Latches the GT911's I²C address to `0x5D` via the canonical
    INT-low / RST-pulse reset dance.
-5. Allocates the 480×480 RGB565 framebuffer in PSRAM, configures the
+5. Brings up the 8 MB octal PSRAM, allocates the 480×480 RGB565
+   framebuffer in it, and configures the
    LCD_CAM peripheral's DPI block at 12 MHz PCLK / 480×480 active.
 6. Sets up a DRAM bounce-buffer descriptor ring, starts a continuous
    DMA transfer feeding the panel, and installs the EOF interrupt
@@ -114,10 +110,7 @@ pub struct Board<'d> {
   ISR live in module-level statics.
 - The DPI DMA transfer is leaked intentionally — dropping it would
   stop the panel.
-- Requires `esp_hal::init` to be called with PSRAM sized to at least
-  ~450 KB (`8 * 1024 * 1024` covers it comfortably).
-- Pinned to `esp-hal = =1.0.0-rc.0`. See the workspace
-  [Cargo.toml](Cargo.toml) for why.
+- Built for `esp-hal` 1.2 (`~1.2.2`) and `esp-rtos` 0.4.
 
 ## Re-exports
 

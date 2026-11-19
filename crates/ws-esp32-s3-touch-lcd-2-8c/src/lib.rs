@@ -9,16 +9,11 @@
 //! ## One-call setup
 //!
 //! ```ignore
-//! use esp_hal::{psram::PsramConfig, psram::PsramSize};
 //! use ws_esp32_s3_touch_lcd_2_8c as bsp;
 //!
-//! let peripherals = esp_hal::init(
-//!     esp_hal::Config::default().with_psram(PsramConfig {
-//!         size: PsramSize::Size(8 * 1024 * 1024),
-//!         ..Default::default()
-//!     }),
-//! );
+//! let peripherals = esp_hal::init(esp_hal::Config::default());
 //!
+//! // `init` brings up the octal PSRAM itself.
 //! let board = bsp::init(bsp::take_resources!(peripherals))
 //!     .expect("board init");
 //!
@@ -74,8 +69,6 @@
 //!   call would corrupt them.
 //! - The DPI DMA transfer is leaked intentionally (`mem::forget`) —
 //!   dropping it would stop the panel.
-//! - Requires `esp_hal::init` to have been called with PSRAM sized to
-//!   at least the framebuffer (~450 KB).
 
 #![no_std]
 #![deny(missing_docs)]
@@ -125,8 +118,20 @@ use esp_hal::{
         LcdCam,
     },
     peripherals,
+    psram::{Psram, PsramConfig, PsramMode, PsramSize},
     time::Rate,
 };
+
+/// The board carries 8 MB of octal PSRAM. Quad mode fails silently:
+/// CPU writes stay in the data cache and the framebuffer reads back
+/// stale.
+fn psram_config() -> PsramConfig {
+    PsramConfig {
+        mode: PsramMode::OctalSpi,
+        size: PsramSize::Size(8 * 1024 * 1024),
+        ..Default::default()
+    }
+}
 
 // Re-export the underlying driver crates so consumers don't need to
 // pull them in separately (or worry about version skew).
@@ -222,7 +227,7 @@ pub struct DpiDataPins<'d> {
 ///
 /// // Pluck timers and anything else you need *first* —
 /// let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
-/// esp_hal_embassy::init(timg0.timer0);
+/// esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 ///
 /// // — then hand the rest to the BSP.
 /// let board = bsp::init(bsp::take_resources!(peripherals))?;
@@ -322,16 +327,17 @@ pub struct Board {
     /// SD card pins, released after [`init`] used GPIO1/2 for the
     /// ST7701 init bit-bang. See [`SdPins`] for caveats.
     pub sd_pins: SdPins,
+
+    /// Keeps the PSRAM driver, and so the framebuffer mapping, claimed.
+    _psram: Psram,
 }
 
 /// SD/MMC pins exposed by the BSP for consumer-managed SD card
 /// support.
 ///
-/// **`esp-hal` 1.0.0-rc.0 doesn't yet expose an SDHOST driver for
-/// the S3**, so these pins can't actually be wired up from pure
-/// Rust today — but the BSP's pin-ownership handoff (ST7701 init
-/// → SD use) is already done, so a future driver only needs the
-/// protocol code, not the BSP plumbing.
+/// **The BSP does not drive the SD card itself.** The pin-ownership
+/// handoff (ST7701 init → SD use) is done, so an SD driver only
+/// needs the protocol code, not the BSP plumbing.
 ///
 /// The SD card's D3 line runs through the PCA9554 expander — see
 /// [`consts::pca9554::SD_D3_EN_BIT`]. When a future SD driver
@@ -365,8 +371,7 @@ pub enum Error {
     /// `esp_hal::lcd_cam::lcd::dpi::Dpi::new` rejected its config.
     Dpi,
     /// PSRAM mapped region is smaller than [`PSRAM_BYTES_REQUIRED`]
-    /// (two framebuffers, ~920 KB). Make sure `esp_hal::init` was
-    /// called with the right `PsramConfig`.
+    /// (two framebuffers, ~920 KB).
     PsramTooSmall,
     /// The DPI DMA transfer failed to start.
     DpiStart,
@@ -544,8 +549,9 @@ pub fn init(r: Resources<'static>) -> Result<Board, Error> {
         .with_data15(r.data.r4);
 
     // ----- PSRAM framebuffer + bounce-buffer ring ---------------------------
-    let (psram_ptr, psram_size) = esp_hal::psram::psram_raw_parts(&r.psram);
-    // SAFETY: `psram_raw_parts` returns the mapped, DMA-capable region.
+    let psram = Psram::new(r.psram, psram_config());
+    let (psram_ptr, psram_size) = psram.raw_parts();
+    // SAFETY: `raw_parts` returns the mapped, DMA-capable region.
     // We treat the first 2× FRAMEBUFFER_BYTES of it as ours (front +
     // back); the rest is the user's to do what they like with.
     let (initial_front_ptr, framebuffer) =
@@ -625,6 +631,7 @@ pub fn init(r: Resources<'static>) -> Result<Board, Error> {
             cmd: sd_cmd,
             d0:  r.sd_d0,
         },
+        _psram: psram,
     })
 }
 

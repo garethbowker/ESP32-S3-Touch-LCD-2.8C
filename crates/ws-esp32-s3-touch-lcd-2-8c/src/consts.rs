@@ -70,10 +70,8 @@ pub mod pca9554 {
 /// [`crate::init`] uses them during panel bring-up and returns them
 /// for SD use via [`crate::Board::sd_pins`].
 ///
-/// **`esp-hal` 1.0.0-rc.0 does not yet expose an SDHOST/SDMMC driver
-/// for the S3**, so no SD card driver can be wired up from pure Rust
-/// today. The pin layout is documented here for when that support
-/// arrives.
+/// The BSP does not drive the SD card itself; the pin layout is
+/// documented here for a consumer-supplied driver.
 pub mod sd {
     /// SD CLK — also the ST7701 init SCK during panel bring-up.
     pub const CLK_GPIO: u8 = 2;

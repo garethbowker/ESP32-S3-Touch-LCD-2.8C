@@ -36,7 +36,7 @@ use embedded_graphics::{
     text::Text,
 };
 use esp_backtrace as _;
-use esp_hal::efuse::{Efuse, WAFER_VERSION_MAJOR, WAFER_VERSION_MINOR_HI, WAFER_VERSION_MINOR_LO};
+use esp_hal::efuse::{self, WAFER_VERSION_MAJOR, WAFER_VERSION_MINOR_HI, WAFER_VERSION_MINOR_LO};
 use ws_esp32_s3_touch_lcd_2_8c::{
     self as bsp,
     rtc::{Date, Month, PrimitiveDateTime, Time},
@@ -152,31 +152,27 @@ static TAP_COUNT: AtomicU32 = AtomicU32::new(0);
 // Entry
 // ---------------------------------------------------------------------------
 
-#[esp_hal_embassy::main]
+#[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    let peripherals = esp_hal::init(
-        esp_hal::Config::default().with_psram(esp_hal::psram::PsramConfig {
-            size: esp_hal::psram::PsramSize::Size(8 * 1024 * 1024),
-            ..Default::default()
-        }),
-    );
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
-    esp_hal_embassy::init(timg0.timer0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     esp_println::logger::init_logger_from_env();
 
     let mut board = bsp::init(bsp::take_resources!(peripherals)).expect("board init");
 
     // ---- Device info ----
-    let mac = Efuse::read_base_mac_address();
-    let wafer_major: u8 = Efuse::read_field_le(WAFER_VERSION_MAJOR);
-    let wafer_minor_lo: u8 = Efuse::read_field_le(WAFER_VERSION_MINOR_LO);
-    let wafer_minor_hi: u8 = Efuse::read_field_le(WAFER_VERSION_MINOR_HI);
+    let mac_address = efuse::base_mac_address();
+    let mac = mac_address.as_bytes();
+    let wafer_major: u8 = efuse::read_field_le(WAFER_VERSION_MAJOR);
+    let wafer_minor_lo: u8 = efuse::read_field_le(WAFER_VERSION_MINOR_LO);
+    let wafer_minor_hi: u8 = efuse::read_field_le(WAFER_VERSION_MINOR_HI);
     let wafer_minor = (wafer_minor_hi << 3) | (wafer_minor_lo & 0x7);
-    let (block_major, block_minor) = Efuse::block_version();
+    let (block_major, block_minor) = efuse::block_version();
     let mut mac_str = heapless::String::<24>::new();
     let _ = core::fmt::write(
         &mut mac_str,
@@ -195,7 +191,7 @@ async fn main(spawner: Spawner) {
         mac_str.as_str(),
         wafer_major, wafer_minor,
         block_major, block_minor,
-        Efuse::flash_encryption(),
+        efuse::flash_encryption(),
     );
 
     let seed = PrimitiveDateTime::new(
@@ -219,9 +215,9 @@ async fn main(spawner: Spawner) {
     let framebuffer = board.framebuffer;
     core::mem::forget(board.backlight);
 
-    spawner.spawn(touch_task(touch, buzzer)).expect("spawn touch");
-    spawner.spawn(sensor_task(imu, rtc)).expect("spawn sensor");
-    spawner.spawn(render_task(framebuffer, mac_str, chip_str)).expect("spawn render");
+    spawner.spawn(touch_task(touch, buzzer).expect("spawn touch"));
+    spawner.spawn(sensor_task(imu, rtc).expect("spawn sensor"));
+    spawner.spawn(render_task(framebuffer, mac_str, chip_str).expect("spawn render"));
 
     loop {
         Timer::after(Duration::from_secs(10)).await;
